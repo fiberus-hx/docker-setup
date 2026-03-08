@@ -81,7 +81,7 @@ docker build \
 docker run --rm -it \
   --security-opt seccomp=unconfined \
   --ulimit memlock=-1:-1 \
-  -v $(pwd)/project:/workspace \
+  -v $(pwd):/workspace \
   fiberus
 ```
 
@@ -91,7 +91,7 @@ docker run --rm -it \
 docker run --rm -it \
   --security-opt seccomp=unconfined \
   --ulimit memlock=-1:-1 \
-  -v $(pwd)/project:/workspace \
+  -v $(pwd):/workspace \
   -v fiberus-cache:/opt/fiberus-cache \
   fiberus
 ```
