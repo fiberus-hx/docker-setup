@@ -1,6 +1,8 @@
 # docker-setup
 
-Docker development environment for Fiberus. Builds a self-contained image with the Haxe compiler (fiberus target, compiled from source), the Fiberus runtime, GCC toolchain, and all native dependencies. Mount your project into `/workspace` and compile directly inside the container.
+Docker development environment for Fiberus. Builds a self-contained image with the Haxe compiler (fiberus target, **local prebuilt binary** — the current fork branch exists only locally, nothing is cloned), the Fiberus runtime, GCC toolchain, and all native dependencies. Mount your project into `/workspace` and compile directly inside the container.
+
+**Prerequisite:** build the Haxe fork locally first — the image copies `haxe/haxe` and `haxe/std` from the repo. Every image rebuild snapshots the exact current local toolchain (~2 min; rebuild after toolchain changes).
 
 ## Quick Start
 
@@ -19,17 +21,17 @@ docker run --rm -it \
 
 ## Architecture
 
-The Dockerfile uses a two-stage build:
+Single-stage build from `ubuntu:24.04`:
 
-**Stage 1 (`builder`)** -- Installs the full OCaml/opam toolchain, clones the Haxe compiler source from `fiberus-hx/haxe` on GitHub, and builds it from source. The compiled `haxe` and `haxelib` binaries plus the standard library are installed to `/opt/haxe`.
-
-**Stage 2 (final image)** -- Starts from a clean `ubuntu:24.04`. Installs only runtime/build dependencies (gcc, g++, neko, liburing-dev, libjemalloc-dev, make). Copies the built Haxe compiler from stage 1, copies the `fiberus/` runtime source, registers it as a haxelib dev library, and sets the entrypoint to `docker-entrypoint.sh`.
+- Installs build dependencies (gcc, g++, binutils, make, liburing-dev, libjemalloc-dev) plus the distro `haxe` package, which supplies `haxelib`, neko, and the mbedtls/pcre2 shared libs the fork binary links against.
+- Copies the **local prebuilt** Haxe fork binary (`haxe/haxe`) and stdlib (`haxe/std`) to `/opt/haxe`; the `/usr/local/bin/haxe` symlink shadows the distro `/usr/bin/haxe`.
+- Copies the `fiberus/` runtime source to `/opt/fiberus`, registers it as a haxelib dev library, and sets the entrypoint to `docker-entrypoint.sh`.
 
 ## Files
 
 ```
 docker-setup/
-  Dockerfile              Multi-stage build (builder + final image)
+  Dockerfile              Single-stage build (local prebuilt haxe + fiberus runtime)
   build-docker.sh         Build script (wraps docker build with defaults)
   docker-entrypoint.sh    Runtime checks (kernel, seccomp, memlock)
 
@@ -51,14 +53,12 @@ The build script (`build-docker.sh`) accepts environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HAXE_BRANCH` | `fiberus` | Git branch of `fiberus-hx/haxe` to build |
 | `IMAGE_NAME` | `fiberus` | Docker image name |
 | `IMAGE_TAG` | `latest` | Docker image tag |
 
-```bash
-# Build from a specific branch
-HAXE_BRANCH=typedis ./build-docker.sh
+The script preflights that `haxe/haxe` and `haxe/std` exist and aborts with instructions if not.
 
+```bash
 # Custom image name
 IMAGE_NAME=my-fiberus IMAGE_TAG=v1 ./build-docker.sh
 ```
@@ -68,7 +68,6 @@ Or build directly with `docker build`:
 ```bash
 docker build \
   --platform linux/amd64 \
-  --build-arg HAXE_BRANCH=fiberus \
   -f docker-setup/Dockerfile \
   -t fiberus .
 ```
@@ -81,9 +80,25 @@ docker build \
 docker run --rm -it \
   --security-opt seccomp=unconfined \
   --ulimit memlock=-1:-1 \
-  -v $(pwd):/workspace \
+  -v $(pwd)/your-project:/workspace \
   fiberus
 ```
+
+**Building this repo's `libraries/` in the container** — two traps:
+
+1. Do NOT mount the repo root at `/workspace`: haxelib picks up the host `.haxelib/` (a local repo beats the global config) and its dev paths are host-absolute. Mount `libraries/` only.
+2. `fib_sqlite3/lib/*.c` include `../../../fiberus/runtime/*.h`, so the layout `<root>/libraries/<lib>` + `<root>/fiberus/` must exist — recreate it with a symlink to the baked-in runtime:
+
+```bash
+docker run --rm -it \
+  --security-opt seccomp=unconfined \
+  --ulimit memlock=-1:-1 \
+  -v $(pwd)/libraries:/workspace/libraries \
+  fiberus \
+  bash -c "ln -s /opt/fiberus /workspace/fiberus && cd /workspace/libraries/alexandria && make release && make test"
+```
+
+The container runs as root — `chown -R $(id -u):$(id -g)` mounted build outputs (`bin/`, `test/bin/`, `client/`) afterwards.
 
 **With persistent compile cache** (avoids re-compiling the runtime `.a` on each run):
 
@@ -111,17 +126,18 @@ All checks are warnings only -- the container still starts, but Fiberus programs
 
 | Component | Path | Notes |
 |-----------|------|-------|
-| Haxe compiler | `/opt/haxe/haxe`, `/opt/haxe/haxelib` | Built from source (fiberus target) |
+| Haxe compiler | `/opt/haxe/haxe` | Local prebuilt fork binary (fiberus target) |
 | Haxe std library | `/opt/haxe/std` | Includes fiberus std lib |
+| haxelib | `/usr/bin/haxelib` | From the distro `haxe` package (the distro `/usr/bin/haxe` is shadowed) |
 | Fiberus runtime | `/opt/fiberus/` | Registered as haxelib dev library |
 | GCC/G++ | System packages | Required: fiberus compiles generated C at user build time |
-| Neko | System package | Required by haxelib |
+| Neko | System package | Required by haxelib (pulled in by the `haxe` package) |
 | liburing-dev | System package | io_uring headers |
 | libjemalloc-dev | System package | Memory allocator |
 
 ## .dockerignore
 
-The build context is the project root. The `.dockerignore` excludes everything except `fiberus/` (runtime source, minus obj/lib) and `docker-setup/docker-entrypoint.sh`. The Haxe compiler is built from a GitHub clone inside the container, not copied from the host.
+The build context is the project root. The `.dockerignore` excludes everything except `fiberus/` (runtime source, minus obj/lib), `haxe/haxe` + `haxe/std` (local prebuilt compiler), and `docker-setup/docker-entrypoint.sh`.
 
 ## Platform
 
